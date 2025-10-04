@@ -1,7 +1,10 @@
 [build]
-  base    = "frontend"
-  command = "npm ci && npm run build"
+  # No base directory — we cd into frontend in the command
+  command = "cd frontend && npm ci && npm run build"
   publish = "frontend/build"
 
 [build.environment]
-  CI = "true"
+  REACT_APP_API_BASE = "https://weatheryzer.onrender.com"
+  # If you want to keep building even with warnings:
+  CI = "false"
+
