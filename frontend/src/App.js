@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { Line, Bar, Doughnut } from "react-chartjs-2";
+import { Bar, Doughnut } from "react-chartjs-2";
 import {
   Chart as ChartJS,
   CategoryScale, LinearScale, PointElement, LineElement, BarElement, ArcElement,
@@ -32,6 +32,7 @@ function parseLatLonSmart(str) {
   if (parts.length === 2) return [parseFloat(parts[0]), parseFloat(parts[1])];
   return [NaN, NaN];
 }
+
 function parseToDate(v) {
   if (!v || typeof v !== "string") return null;
   const s = v.trim(); if (!s) return null;
@@ -42,17 +43,38 @@ function parseToDate(v) {
   }
   return null;
 }
+
 const fmt = (x, d=1) => (x === null || x === undefined || Number.isNaN(+x) ? "—" : (+x).toFixed(d));
-const API_BASE = "http://127.0.0.1:5000";
+
+// IMPORTANT: prod backend URL via env (Netlify) with a safe fallback
+const API = process.env.REACT_APP_API_BASE || "https://weatheryzer.onrender.com";
+
+// tiny helper to POST JSON safely
+async function postJSON(path, payload) {
+  const res = await fetch(`${API}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch {}
+  if (!res.ok) {
+    const msg = data?.message || text || `HTTP ${res.status}`;
+    throw new Error(msg);
+  }
+  return data;
+}
 
 // ---- gauge
 function Gauge({ value }) {
+  const v = Math.max(0, Math.min(100, Number(value) || 0));
   const data = {
     labels: ["Risk", "Other"],
     datasets: [{
-      data: [value, 100 - value],
+      data: [v, 100 - v],
       backgroundColor: [
-        value >= 50 ? "rgba(239,68,68,0.95)" : "rgba(37,99,235,0.95)",
+        v >= 50 ? "rgba(239,68,68,0.95)" : "rgba(37,99,235,0.95)",
         "rgba(148,163,184,0.15)"
       ],
       borderWidth: 0
@@ -61,7 +83,7 @@ function Gauge({ value }) {
   return (
     <div className="ring">
       <Doughnut data={data} options={{ cutout: "70%", plugins: { legend: { display: false } } }} />
-      <div className="ringText">{value}%</div>
+      <div className="ringText">{v}%</div>
     </div>
   );
 }
@@ -79,7 +101,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
-  // NEW: AI advice state
+  // AI advice state
   const [task, setTask] = useState("");
   const [advice, setAdvice] = useState(null);
 
@@ -135,16 +157,7 @@ export default function App() {
     let [lat, lon] = parseLatLonSmart(location);
     if (Number.isNaN(lat) || Number.isNaN(lon)) { setErr("Enter/select a valid location."); return null; }
     if (!validDate) { setErr("Pick a valid date (YYYY-MM-DD)."); return null; }
-    return { lat, lon };
-  };
-
-  const handleJson = async (res) => {
-    if (!res.ok) {
-      let msg = `HTTP ${res.status}`;
-      try { const j = await res.json(); if (j?.message) msg = j.message; } catch {}
-      throw new Error(msg);
-    }
-    return res.json();
+    return { lat: Number(lat), lon: Number(lon) };
   };
 
   // API
@@ -155,11 +168,7 @@ export default function App() {
     const { lat, lon } = v;
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/check-risk`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lat, lon, date, condition }),
-      });
-      const data = await handleJson(res);
+      const data = await postJSON("/check-risk", { lat, lon, date, condition });
       setResult({ ...data, lat, lon, date, condition });
     } catch (e) { setErr(`Request failed: ${e.message}`); }
     finally { setLoading(false); }
@@ -171,11 +180,7 @@ export default function App() {
     const { lat, lon } = v;
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/best-risk`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lat, lon, date }),
-      });
-      const data = await handleJson(res);
+      const data = await postJSON("/best-risk", { lat, lon, date });
       setRanked(data.ranked || []);
       if (data.top) {
         setCondition(data.top.condition);
@@ -193,11 +198,7 @@ export default function App() {
     const { lat, lon } = v;
     setLoading(true); setErr("");
     try {
-      const res = await fetch(`${API_BASE}/check-risk`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lat, lon, date, condition: cond }),
-      });
-      const data = await handleJson(res);
+      const data = await postJSON("/check-risk", { lat, lon, date, condition: cond });
       setResult({ ...data, lat, lon, date, condition: cond });
     } catch (e) { setErr(`Could not load series for ${cond}: ${e.message}`); }
     finally { setLoading(false); }
@@ -206,20 +207,25 @@ export default function App() {
   const downloadCSV = async () => {
     if (!result) return;
     const { lat, lon, date, condition } = result;
-    const res = await fetch(`${API_BASE}/export-csv`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ lat, lon, date, condition }),
-    });
-    if (!res.ok) { setErr("CSV download failed."); return; }
-    const text = await res.text();
-    const blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `weatheryzer_${result.metric}.csv`; a.click();
-    URL.revokeObjectURL(url);
+    try {
+      const res = await fetch(`${API}/export-csv`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lat, lon, date, condition }),
+      });
+      if (!res.ok) { setErr("CSV download failed."); return; }
+      const text = await res.text();
+      const blob = new Blob([text], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `weatheryzer_${result.metric}.csv`; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setErr(`CSV download failed: ${e.message}`);
+    }
   };
 
-  // NEW: AI advice
+  // AI advice
   const getAdvice = async () => {
     setErr(""); setAdvice(null);
     const v = requireLatLonDate(); if (!v) return;
@@ -227,40 +233,18 @@ export default function App() {
     const { lat, lon } = v;
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/ai-advice`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lat, lon, date, task }),
-      });
-      const data = await handleJson(res);
-      setAdvice(data);
-      if (!result?.daily && data?.daily) {
-        setResult(prev => prev ? { ...prev, daily: data.daily } : prev);
+      const data = await postJSON("/ai-advice", { lat, lon, date, task: task.trim() });
+      if (data.error) {
+        setErr(data.message || "Advice could not be generated.");
+      } else {
+        setAdvice(data);
+        if (!result?.daily && data?.daily) {
+          setResult(prev => prev ? { ...prev, daily: data.daily } : prev);
+        }
       }
     } catch (e) { setErr(`Advice failed: ${e.message}`); }
     finally { setLoading(false); }
   };
-
-  // charts
-  const lineData = result?.series?.length ? {
-    labels: result.series.map(d => d.date),
-    datasets: [
-      {
-        label: `${result.metric} (${result.unit})`,
-        data: result.series.map(d => d.value),
-        borderColor: "#38bdf8",
-        backgroundColor: "rgba(56,189,248,0.15)",
-        tension: 0.25, pointRadius: 0,
-      },
-      {
-        label: `Threshold (${result.threshold} ${result.unit})`,
-        data: result.series.map(() => result.threshold),
-        borderColor: "#f87171",
-        borderDash: [6, 6],
-        pointRadius: 0,
-      },
-    ],
-  } : null;
 
   const bars = ranked ? {
     labels: ranked.map(r => r.label),
@@ -353,7 +337,7 @@ export default function App() {
           </div>
         </form>
 
-        {/* NEW: AI task input */}
+        {/* AI task input */}
         <div className="panel" style={{ marginTop: 12 }}>
           <label>🤖 What are you planning to do on that day?</label>
           <textarea
@@ -414,77 +398,80 @@ export default function App() {
             </div>
           </div>
 
-          {/* Daily snapshot+ */}
-          {daily && (
-            <div className="panel">
-              <h4>🌤️ Daily snapshot & event chances</h4>
-              <div className="grid2">
-                <div>
-                  <p>🌡️ <b>Temperature</b> (°C)</p>
-                  <ul className="small muted">
-                    <li>Mean: <b>{fmt(daily.expected?.t2m)}</b></li>
-                    <li>High: <b>{fmt(daily.expected?.t2m_max)}</b></li>
-                    <li>Low: <b>{fmt(daily.expected?.t2m_min)}</b></li>
-                  </ul>
+          {/* Daily snapshot */}
+          {result.daily && (() => {
+            const daily = result.daily;
+            return (
+              <div className="panel">
+                <h4>🌤️ Daily snapshot & event chances</h4>
+                <div className="grid2">
+                  <div>
+                    <p>🌡️ <b>Temperature</b> (°C)</p>
+                    <ul className="small muted">
+                      <li>Mean: <b>{fmt(daily.expected?.t2m)}</b></li>
+                      <li>High: <b>{fmt(daily.expected?.t2m_max)}</b></li>
+                      <li>Low: <b>{fmt(daily.expected?.t2m_min)}</b></li>
+                    </ul>
+                  </div>
+                  <div>
+                    <p>🌧️ <b>Precipitation</b></p>
+                    <ul className="small muted">
+                      <li>Amount (median): <b>{fmt(daily.expected?.precip)} mm</b></li>
+                      <li>Chance ≥1 mm: <b>{fmt(daily.rain_chance_pct,0)}%</b></li>
+                      <li>Chance heavy rain: <b>{fmt(daily.heavy_rain_chance_pct,0)}%</b></li>
+                    </ul>
+                  </div>
+                  <div>
+                    <p>❄️ <b>Cold/Snow</b></p>
+                    <ul className="small muted">
+                      <li>Frost chance: <b>{fmt(daily.frost_chance_pct,0)}%</b></li>
+                      <li>Snow chance: <b>{fmt(daily.snow_chance_pct,0)}%</b></li>
+                      <li>Cold spell (3-day) chance: <b>{fmt(daily.cold_spell_chance_pct,0)}%</b></li>
+                    </ul>
+                  </div>
+                  <div>
+                    <p>🔥 <b>Heat</b></p>
+                    <ul className="small muted">
+                      <li>Hot-day chance (≥35 °C): <b>{fmt(daily.heat_day_chance_pct,0)}%</b></li>
+                      <li>Heatwave (3-day) chance: <b>{fmt(daily.heatwave_chance_pct,0)}%</b></li>
+                    </ul>
+                  </div>
+                  <div>
+                    <p>☁️ <b>Cloud / 💨 Wind / 💧 Humidity</b></p>
+                    <ul className="small muted">
+                      <li>Cloudiness (median): <b>{fmt(daily.expected?.cloud_pct,0)}%</b></li>
+                      <li>Wind (median): <b>{fmt(daily.expected?.ws10m)} m/s</b></li>
+                      <li>Humidity (median): <b>{fmt(daily.expected?.rh2m,0)}%</b></li>
+                    </ul>
+                  </div>
+                  <div>
+                    <p>🌫️ <b>Air quality / Dust proxy</b></p>
+                    <ul className="small muted">
+                      <li>AOD 550 nm (median): <b>{fmt(daily.air_quality?.aod550_median,3)}</b></li>
+                      <li>Category: <b>{daily.air_quality?.category ?? "—"}</b></li>
+                    </ul>
+                  </div>
                 </div>
-                <div>
-                  <p>🌧️ <b>Precipitation</b></p>
-                  <ul className="small muted">
-                    <li>Amount (median): <b>{fmt(daily.expected?.precip)} mm</b></li>
-                    <li>Chance ≥1 mm: <b>{fmt(daily.rain_chance_pct,0)}%</b></li>
-                    <li>Chance heavy rain: <b>{fmt(daily.heavy_rain_chance_pct,0)}%</b></li>
-                  </ul>
-                </div>
-                <div>
-                  <p>❄️ <b>Cold/Snow</b></p>
-                  <ul className="small muted">
-                    <li>Frost chance: <b>{fmt(daily.frost_chance_pct,0)}%</b></li>
-                    <li>Snow chance: <b>{fmt(daily.snow_chance_pct,0)}%</b></li>
-                    <li>Cold spell (3-day) chance: <b>{fmt(daily.cold_spell_chance_pct,0)}%</b></li>
-                  </ul>
-                </div>
-                <div>
-                  <p>🔥 <b>Heat</b></p>
-                  <ul className="small muted">
-                    <li>Hot-day chance (≥35 °C): <b>{fmt(daily.heat_day_chance_pct,0)}%</b></li>
-                    <li>Heatwave (3-day) chance: <b>{fmt(daily.heatwave_chance_pct,0)}%</b></li>
-                  </ul>
-                </div>
-                <div>
-                  <p>☁️ <b>Cloud / 💨 Wind / 💧 Humidity</b></p>
-                  <ul className="small muted">
-                    <li>Cloudiness (median): <b>{fmt(daily.expected?.cloud_pct,0)}%</b></li>
-                    <li>Wind (median): <b>{fmt(daily.expected?.ws10m)} m/s</b></li>
-                    <li>Humidity (median): <b>{fmt(daily.expected?.rh2m,0)}%</b></li>
-                  </ul>
-                </div>
-                <div>
-                  <p>🌫️ <b>Air quality / Dust proxy</b></p>
-                  <ul className="small muted">
-                    <li>AOD 550 nm (median): <b>{fmt(daily.air_quality?.aod550_median,3)}</b></li>
-                    <li>Category: <b>{daily.air_quality?.category ?? "—"}</b></li>
-                  </ul>
-                </div>
-              </div>
 
-              {daily.last_year && (
-                <p className="small muted" style={{ marginTop: 8 }}>
-                  Last year ({daily.last_year.date}): mean {fmt(daily.last_year.t2m)}°C,
-                  high {fmt(daily.last_year.t2m_max)}°C, low {fmt(daily.last_year.t2m_min)}°C,
-                  rain {fmt(daily.last_year.precip)} mm, clouds {fmt(daily.last_year.cloud_pct,0)}%,
-                  wind {fmt(daily.last_year.ws10m)} m/s, humidity {fmt(daily.last_year.rh2m,0)}%,
-                  AOD {fmt(daily.last_year.aod550,3)}.
+                {daily.last_year && (
+                  <p className="small muted" style={{ marginTop: 8 }}>
+                    Last year ({daily.last_year.date}): mean {fmt(daily.last_year.t2m)}°C,
+                    high {fmt(daily.last_year.t2m_max)}°C, low {fmt(daily.last_year.t2m_min)}°C,
+                    rain {fmt(daily.last_year.precip)} mm, clouds {fmt(daily.last_year.cloud_pct,0)}%,
+                    wind {fmt(daily.last_year.ws10m)} m/s, humidity {fmt(daily.last_year.rh2m,0)}%,
+                    AOD {fmt(daily.last_year.aod550,3)}.
+                  </p>
+                )}
+                <p className="small muted" style={{ marginTop: 6 }}>
+                  Air-quality/dust uses satellite AOD as a coarse proxy (not a regulatory AQI).
                 </p>
-              )}
-              <p className="small muted" style={{ marginTop: 6 }}>
-                Air-quality/dust uses satellite AOD as a coarse proxy (not a regulatory AQI).
-              </p>
-            </div>
-          )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
-      {/* NEW: AI Advice card */}
+      {/* AI Advice card */}
       {advice && (
         <div className="card">
           <div className={`adviceBadge ${advice.verdict_key}`}>
@@ -517,48 +504,51 @@ export default function App() {
         </div>
       )}
 
-      {/* Bottom "Day-at-a-glance" tiles */}
-      {daily && (
-        <div className="card">
-          <h3>📊 Day-at-a-glance</h3>
-          <div className="facts">
-            <div className="fact">
-              <h5>Temperature</h5>
-              <div className="kpi">{fmt(daily.expected?.t2m)}°C</div>
-              <div className="muted small">High {fmt(daily.expected?.t2m_max)} / Low {fmt(daily.expected?.t2m_min)}°C</div>
-            </div>
-            <div className="fact">
-              <h5>Precipitation</h5>
-              <div className="kpi">{fmt(daily.expected?.precip)} mm</div>
-              <div className="muted small">≥1mm: {fmt(daily.rain_chance_pct,0)}% • Heavy: {fmt(daily.heavy_rain_chance_pct,0)}%</div>
-            </div>
-            <div className="fact">
-              <h5>Cloud cover</h5>
-              <div className="kpi">{fmt(daily.expected?.cloud_pct,0)}%</div>
-            </div>
-            <div className="fact">
-              <h5>Wind</h5>
-              <div className="kpi">{fmt(daily.expected?.ws10m)} m/s</div>
-              <div className="muted small">Humidity {fmt(daily.expected?.rh2m,0)}%</div>
-            </div>
-            <div className="fact">
-              <h5>Heat</h5>
-              <div className="kpi">{fmt(daily.heat_day_chance_pct,0)}%</div>
-              <div className="muted small">Heatwave (3-day): {fmt(daily.heatwave_chance_pct,0)}%</div>
-            </div>
-            <div className="fact">
-              <h5>Cold/Snow</h5>
-              <div className="kpi">{fmt(daily.frost_chance_pct,0)}%</div>
-              <div className="muted small">Snow: {fmt(daily.snow_chance_pct,0)}% • Cold spell: {fmt(daily.cold_spell_chance_pct,0)}%</div>
-            </div>
-            <div className="fact">
-              <h5>Air quality (AOD)</h5>
-              <div className="kpi">{fmt(daily.air_quality?.aod550_median,3)}</div>
-              <div className="muted small">{daily.air_quality?.category ?? "—"}</div>
+      {/* Bottom tiles */}
+      {result?.daily && (() => {
+        const daily = result.daily;
+        return (
+          <div className="card">
+            <h3>📊 Day-at-a-glance</h3>
+            <div className="facts">
+              <div className="fact">
+                <h5>Temperature</h5>
+                <div className="kpi">{fmt(daily.expected?.t2m)}°C</div>
+                <div className="muted small">High {fmt(daily.expected?.t2m_max)} / Low {fmt(daily.expected?.t2m_min)}°C</div>
+              </div>
+              <div className="fact">
+                <h5>Precipitation</h5>
+                <div className="kpi">{fmt(daily.expected?.precip)} mm</div>
+                <div className="muted small">≥1mm: {fmt(daily.rain_chance_pct,0)}% • Heavy: {fmt(daily.heavy_rain_chance_pct,0)}%</div>
+              </div>
+              <div className="fact">
+                <h5>Cloud cover</h5>
+                <div className="kpi">{fmt(daily.expected?.cloud_pct,0)}%</div>
+              </div>
+              <div className="fact">
+                <h5>Wind</h5>
+                <div className="kpi">{fmt(daily.expected?.ws10m)} m/s</div>
+                <div className="muted small">Humidity {fmt(daily.expected?.rh2m,0)}%</div>
+              </div>
+              <div className="fact">
+                <h5>Heat</h5>
+                <div className="kpi">{fmt(daily.heat_day_chance_pct,0)}%</div>
+                <div className="muted small">Heatwave (3-day): {fmt(daily.heatwave_chance_pct,0)}%</div>
+              </div>
+              <div className="fact">
+                <h5>Cold/Snow</h5>
+                <div className="kpi">{fmt(daily.frost_chance_pct,0)}%</div>
+                <div className="muted small">Snow: {fmt(daily.snow_chance_pct,0)}% • Cold spell: {fmt(daily.cold_spell_chance_pct,0)}%</div>
+              </div>
+              <div className="fact">
+                <h5>Air quality (AOD)</h5>
+                <div className="kpi">{fmt(daily.air_quality?.aod550_median,3)}</div>
+                <div className="muted small">{daily.air_quality?.category ?? "—"}</div>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       <footer className="muted small">
         Data: NASA POWER (daily). These are historical statistics (not a forecast).

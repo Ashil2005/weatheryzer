@@ -29,7 +29,8 @@ app = Flask(__name__)
 # ---------- CORS (Netlify/production friendly) ----------
 # ALLOWED_ORIGINS can be a comma-separated list, e.g.:
 # "https://weatheryzer.earth,https://www.weatheryzer.earth,https://<your>.netlify.app,http://localhost:3000"
-_ALLOWED_LIST = [o.strip().rstrip("/") for o in os.getenv("ALLOWED_ORIGINS", "*").split(",") if o.strip()]
+_default_allowed = "https://weatheryzer.earth,https://www.weatheryzer.earth,http://localhost:3000"
+_ALLOWED_LIST = [o.strip().rstrip("/") for o in os.getenv("ALLOWED_ORIGINS", _default_allowed).split(",") if o.strip()]
 _ALLOW_ALL = _ALLOWED_LIST == ["*"]
 
 CORS(app,
@@ -38,7 +39,7 @@ CORS(app,
 
 @app.after_request
 def add_cors_headers(resp):
-    # Mirror Origin when it matches allowed list; otherwise "*" (dev)
+    # Mirror Origin when it matches allowed list; otherwise first allowed (production) or "*"
     origin = request.headers.get("Origin", "")
     if _ALLOW_ALL:
         resp.headers["Access-Control-Allow-Origin"] = "*"
@@ -119,6 +120,10 @@ def nz(x, default=0.0):
         return default if not np.isfinite(f) else f
     except Exception:
         return default
+
+def _require_keys(body, keys):
+    """return missing keys list"""
+    return [k for k in keys if k not in body]
 
 # ---------------- fetch ----------------
 def fetch_power(lat, lon, start=DEFAULT_START, end=None):
@@ -791,7 +796,11 @@ def health():
 @app.post("/check-risk")
 def check_risk():
     try:
-        body = request.get_json(force=True)
+        body = request.get_json(silent=True) or {}
+        missing = _require_keys(body, ("lat","lon","date"))
+        if missing:
+            return jsonify({"error":"bad_request","message":f"Missing keys: {missing}"}), 400
+
         lat = float(body["lat"]); lon = float(body["lon"])
         date_str = body["date"]
         condition = body.get("condition", "Very Hot")
@@ -830,7 +839,11 @@ def check_risk():
 @app.post("/best-risk")
 def best_risk():
     try:
-        body = request.get_json(force=True)
+        body = request.get_json(silent=True) or {}
+        missing = _require_keys(body, ("lat","lon","date"))
+        if missing:
+            return jsonify({"error":"bad_request","message":f"Missing keys: {missing}"}), 400
+
         lat = float(body["lat"]); lon = float(body["lon"])
         date_str = body["date"]
         window_days = int(body.get("window_days", 7))
@@ -869,11 +882,16 @@ def ai_advice():
     Returns 200 with payload even if AI provider fails (so FE never shows 'Failed to fetch').
     """
     try:
-        body = request.get_json(force=True)
+        body = request.get_json(silent=True) or {}
+        missing = _require_keys(body, ("lat","lon","date","task"))
+        if missing:
+            return jsonify({"error":"no_task","message":"Please provide lat, lon, date and a task."}), 200
+
         lat = float(body["lat"]); lon = float(body["lon"])
         date_str = body["date"]
         task = (body.get("task") or "").strip()
         window_days = int(body.get("window_days", 7))
+
         if not task:
             return jsonify({"error":"no_task","message":"Please describe your plan/task."}), 200
         if parse_any_date(date_str) is None:
@@ -917,7 +935,11 @@ def ai_advice():
 
 @app.post("/export-csv")
 def export_csv():
-    body = request.get_json(force=True)
+    body = request.get_json(silent=True) or {}
+    missing = _require_keys(body, ("lat","lon","date","condition"))
+    if missing:
+        return jsonify({"error":"bad_request","message":f"Missing keys: {missing}"}), 400
+
     lat = float(body["lat"]); lon = float(body["lon"])
     date_str = body["date"]
     condition = body.get("condition","Very Hot")
